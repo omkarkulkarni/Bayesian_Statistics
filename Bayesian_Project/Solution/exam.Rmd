@@ -1,0 +1,832 @@
+---
+title: 'Exam'
+subtitle: 'Bayesian statistics using JAGS and R'
+author: "Omkar S Kulkarni"
+date: 'September 8, 2016'
+output: 
+  pdf_document:
+    fig_caption: yes # if this is used then fig.pos doesn't work in chunks.
+    toc: true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: true  # if you want number sections at each table header
+    # keep_tex: yes
+documentclass: article
+classoption: a4paper
+fontsize: 12pt
+mainfont: Arial
+header-includes:
+  - \usepackage{amsmath}     
+  - \newcommand{\matr}[1]{\mathbf{#1}}
+---
+
+
+# Exercise 1:
+Create a slice sampler to sample from mixture of normals distribution given
+here:
+
+```{r Initilize distribution}
+rm(list=ls()) # remove all variables
+cat("\014") # clear console
+set.seed(1212)
+
+
+dbinorm <- function(x, p1=.5, p2=1-p1, m1=-1, m2=2){
+p1 * dnorm(x, m1) + p2 * dnorm(x, m2)
+}
+
+```
+
+## Let us visualize the distribution given 
+```{r plot distribution, fig.width=4, fig.height=4, fig.cap="Density of the mixture distribution"}
+
+
+input <- seq(-4.5,+5.5,0.001)
+distribution <- dbinorm(input)
+plot(input, distribution,type = 'l', main = "given distribution")
+# we observe a bimodal distribution with peaks at -1 and 2. 
+
+```
+
+## the slice sampler
+```{r, }
+#### Function for Slice sampler ##### 
+Slice.sample.fn = function(N, StartPoint, stepsize){
+# Initialize vectors
+# Keep track of: samples, counters for steps and resamples
+# Set initial time t
+
+  x = vector(length = N) # Samples
+  count = 0
+  count_lower= 0
+  count_upper = 0
+  resample =0
+  
+  # Starting point
+  x[1]= StartPoint
+
+#Actual sampling:
+# 1. from a uniform distribution [0, P(theta|data)] at given theta -- sample
+# 2. Find the boundaries of the distribution at the place of sample
+# 3. Draw a sample from a uniform over the two boundaries
+# and if the sample is outside the boundaries, resample
+# 4. Repeat using new theta
+  for (i in 1:(N-1)){
+    
+      temp = runif(1, 0, dbinorm(x[i])) # Draw 1 sample
+      upper= lower = x[i] # Initialize boundaries
+       #1
+      while(dbinorm(upper) > temp){ # Determine the boundaries
+      upper=  upper + stepsize   # add step size till while fails
+      count_upper = count_upper + 1
+      }
+      
+      #2
+  # Two separate while loops so they can be determined independently
+    while(dbinorm(lower) > temp){
+      lower = lower - stepsize   # substract step size till while fails
+      count_lower = count_lower + 1
+    }
+      
+      ## now we have got the upper and lower boundaries
+      #3
+      
+  # Draw a sample from a uniform over the boundaries
+    x[i+1] = runif(1, lower, upper)
+    
+    while(dbinorm(x[i+1]) < temp){
+      x[i+1] = runif(1, lower, upper) # Resample
+      resample= resample + 1
+      }
+  }
+
+
+  count=  max(count_upper, count_lower)
+  X =list(samples = x, count = count, resample = resample)
+  return(X)
+}
+
+```
+
+## simulate from the sampler and plot output
+We now sample the distribution with our slice sampler in Figure 2. We plot the original distribution in blue. We already anticipate the start point and hence burn in is not considered, but it can be accomodated. Also, effect of different step size (which is 1 in our case) can be shown. 
+
+```{r fig.width=5.5, fig.height=5.5, fig.cap="samples drawn from the slice sampler, blue line shows the original distribution, with 100000 samples and start point is 1"}
+Output = Slice.sample.fn(N = 100000, StartPoint = 1, stepsize = 1)
+ 
+hist(Output$samples, main = "", ylab = "Density",xlab="X", freq = FALSE,breaks = 75)
+input <- seq(-4.5,+5.5,0.001)
+distribution <- dbinorm(input)
+lines(input, distribution, col = 'blue', lty = 4, lwd =2)
+
+```
+
+
+
+# Exercise 2:
+Load the prostate cancer dataset from the bayesQR R-package. These
+data come from a study that examined the correlation between the level of prostate specific antigen and a number of clinical measures in men who were  about to receive a radical prostatectomy. It is a data frame with 97 rows and 9 columns. Use JAGS to solve this exercise.
+
+
+  * estimate a regression with lcavol as dependent variable
+  * all other variables are predictors (also add an intercept)
+  * Check convergence and interpret the results
+  * Make a prediction for the average observation
+  * Investigate and summarize the predictive distribution
+  
+
+
+```{r}
+
+library(bayesQR)
+data("Prostate")
+#?Prostate
+head(Prostate)
+str(Prostate)
+summary(Prostate)
+
+```
+
+The data frame has the following components:
+  _lcavol : log(cancer volume)_
+  _lweight : log(prostate weight)_
+  _age : age_
+  _lbph : log(benign prostatic hyperplasia amount)_
+  _svi : seminal vesicle invasion_
+  _lcp : log(capsular penetration)_
+  _gleason : Gleason score_
+  _pgg45 : percentage Gleason scores 4 or 5_
+  _lpsa : log(prostate specific antigen)_
+
+We input the data. Take all the predictors in 'x' and the independent variable 'lcavol'
+```{r}
+
+# create the input and output in proper format
+x = data.frame((Prostate[,-1]))
+lcavol <- Prostate[,1]
+
+```
+
+We use **JAGS** for the linear regression : 
+
+$$ E(Y|X_i) = \beta_0 + \Sigma(\beta_j x_j)  + \epsilon_i$$
+
+where $\epsilon \~ N(0,\sigma^2)$ ; Once we get the output we compare it with classical linear regression (lm() - Fitting Linear Models). 
+
+## estimate a regression with lcavol as dependent variable (add intercept)
+```{r}
+
+# lets define the model 
+#The model can be stored either as a separate file or given inline as below.
+# http://www4.stat.ncsu.edu/~reich/st590/code/regJAGS
+modelJags <- "
+      data {
+          meanResponse <- mean(lcavol)
+          nu <- length(lcavol) - 2
+      }
+      model {
+      # Likelihood
+          for (i in 1:length(lcavol)){
+          lcavol[i] ~ dnorm(lcavol.hat[i], 1/sigma^2)
+          ##  precision = 1/sigma^2
+          lcavol.hat[i] <- intercept + b[1]*lweight[i] + b[2]*age[i]
+          + b[3]*lbph[i] + b[4]*svi[i] + b[5]*lcp[i]
+          + b[6]*gleason[i] + b[7]*pgg45[i]
+          + b[8]*lpsa[i]
+      }
+      # Priors
+      intercept ~ dnorm(meanResponse, 0.0001)
+      for(i in 1:8) {
+          betaMu[i] ~ dunif(-1000,1000)  # serve as a non-informative prior
+          betaSigma[i] ~ dunif(0, 1000)
+          b[i] ~ dt(betaMu[i], 1/betaSigma[i]^2, nu)
+        
+      }
+      sigma ~ dunif(0, 100)
+}"
+
+
+
+
+require(rjags)
+regression.model <- jags.model(textConnection(modelJags), data = data.frame(lcavol, x),
+n.chains = 3, n.adapt = 500, quiet = FALSE)
+#update(regression.model, 100)
+```
+
+We set the number of chains to 3 and the parameter n.adapt to 500, hence the algorithm will advance 500 steps (system throws away 500 samples as part of the adaptive sampling period for each chain) and then collect samples. We now run the chain with n.iter = 100000. 
+
+
+
+```{r}
+
+Output <- coda.samples(regression.model, variable.names = c("intercept", "b", "sigma"),n.iter = 100000, thin = 30)
+
+summary(Output)
+```
+
+We generate the output samples of the intercept and the $\beta$ coefficiets and $\sigma$ parameters, plotting their density curves respectively. 
+
+```{r}
+par(mfrow = c(3,4))
+plot(Output, trace = FALSE, auto.layout = FALSE)
+par(mfrow = c(1,1))
+
+
+```
+
+
+We now compare the results with that of the coefficients of ordinary linear regression. we expect them to be same. 
+```{r}
+## OLS regression
+fit.lm = lm(lcavol~., data = x)
+coef(fit.lm)
+
+summary(Output)$statistic[,1:2]
+
+```
+
+Outcomes are close.
+
+
+## Check convergence and interpret the results
+
+Assessing convergence is a much more nuanced process, as there are multiple ways to decide if the model has converged. What we want to determine is that our model has appropriately explored the parameter space for each parameter (through trace plots, traceplot function in the coda library), between and within chain variance (the gelman-rubin diagnostic, gelman.diag in the coda library), and auto-correlation in our chains (autocorr.plot in coda). 
+
+We want to ensure that the traceplots are well-mixed for all the parameters (for all chains) which is clear from figure 3, that Gelman Rubin diagnostic is < 1.10 for each parameter (general rule), and from figure 4 the shrink factor is close to 1. And that the chains are not too correlated (this will reduce the effective sample size in our chains), figure not shown.
+
+```{r Check convergence - TracePlots Ex2, fig.cap="the three chains are overlapping for all parameters."}
+
+library(lattice)
+xyplot(Output)
+
+```
+
+```{r, fig.cap="Gelman Plot, Srink factor for all parameters is <1.10"}
+par(mfrow = c(3,4))
+gelman.plot(Output, auto.layout = FALSE)
+par(mfrow = c(1,1))
+```
+
+## Make a prediction for the average observation
+
+
+We know that : 
+
+$$
+\hat{Y}|\matr{x} = \hat{B}_0 + \sum \hat{B}_j x_{j} = \matr{\hat{B}} \cdotp [1,\matr{x}]
+$$
+
+where $\matr{x}$ is vector of predictors, and  $\hat{B}$ are random variables from which we have the Output. Hence, 
+
+We start with a vector of predictors (in this case for average observation) and $\hat{B}$ to calculate for the final prediction. 
+```{r}
+X_avg =colMeans(Prostate[, -1])
+X_avg
+
+beta_Names <- c('intercept', 'b[1]', 'b[2]', 'b[3]', 'b[4]', 'b[5]', 'b[6]', 'b[7]', 'b[8]')
+Beta_hat = as.matrix(Output[[1]][,beta_Names])
+
+round(Beta_hat[1:4,],2) # sample
+
+Y_hat <- Beta_hat %*% append(X_avg, values = 1, after = 0)
+
+```
+
+Thus, the expected value of Y_hat is 
+```{r}
+mean(Y_hat)
+```
+
+And that in comparisomn to the predictions by OLS regression is : 
+```{r}
+predict(fit.lm, newdata = as.data.frame(t(X_avg)))[[1]]
+```
+
+Hence, the predicted mean of the average log(cancer volume) is 1.35
+
+## Investigate and summarize the predictive distribution
+
+Now we plot the predictive distribution for the average observation in next figure. 
+```{r, fig.cap="Posterior predictive distribution of lcavol for mean observations"}
+library(BEST)
+par(mfrow = c(1,1))
+plotPost(Y_hat, xlab='lcavol')
+
+predict(fit.lm, newdata = as.data.frame(t(X_avg)), interval = "prediction")
+```
+
+
+And compare the Bayesian 95% Confidence interval in Figure with the classical linear regression prediction intervals.
+
+
+
+# Exercise 3:
+
+Load the Churn dataset from the bayesQR R-package and read the documentation (e.g. ?Churn). Use JAGS to solve this exercise.
+
+* churn : churn (yes/no)
+* gender : gender of the customer (male = 1)
+* soc : social class of the customer
+* lor : length of relationship with the customer
+* recency : number of days since last purchase
+
+
+```{r}
+library(bayesQR)
+data("Churn")
+```
+This dataset is a stratified random sample from all active customers (at the end of June 2006) of a European financial services company. The dependent variable in this dataset is the churn behavior of the customers in the period from July 1st until December 31th 2006. Here a churned customer is defined as someone who closed all his/her bank accounts with the company. Note that all predictor variables are standardized. This dataset is a small subset of the dataset used in Benoit and Van den Poel (2013). The dataset is structured as a dataframe with 400 observations and 5 variables.
+```{r}
+# proportion of churned customers
+sum(Churn$churn)/nrow(Churn)
+names(Churn)[3] <- 'soc'
+head(Churn)
+
+```
+
+
+## estimate a logistic regression with churn as dependent variable
+
+### Robust logistic regression with JAGS
+
+According to classical logistic regression model the assumption is$churn \sim Bernoulli(\mu)$. and  $\mu$ is modeled according to the following equation
+
+$$
+logit(\mu) = log(\frac{\mu}{1-\mu}) = \beta_0 + \sum \beta_i x_i
+$$
+
+which can be rewritten as
+
+$$
+\mu = logit^{-1}(\beta_0 + \sum \beta_i x_i) = \frac{1}{1 + exp( - \beta_0 - \sum \beta_i x_i)}
+$$
+
+We try to keep the model on similar lines to logistic regression. 
+
+```{r}
+# http://stephenrho.github.io/rjags-model.html
+# Rather than modelling P, which falls within [0,1], directly we model the log
+#odds of success which spans [-inf, inf].
+
+
+jags.logistic <- "
+  data {
+    out.r <- mean(churn)
+    nu <- length(churn) - 2
+  }
+  model {
+
+    # Likelihood
+
+    for ( i in 1:length(churn) ) {
+    logit(mu[i]) <- intercept + b[1] * gender[i] + b[2] * soc[i] 
+                              + b[3] * lor[i] + b[4] * recency[i]
+    churn[i] ~ dbern(mu[i])
+    }
+  
+    # Priors
+    intercept ~ dt(out.r, 1/10^2, nu)
+    for(i in 1:4) {
+      bMu[i] ~ dunif(-1000, 1000)
+      bSigma[i] ~ dunif(0, 1000)
+      b[i] ~ dt(bMu[i], 1/bSigma[i]^2, nu)
+    }
+}"
+
+
+```
+
+Again we initialize the sampler with n.chains = 3 and n.adapt = 1000 (burn in period).And generate the samples.
+
+```{r, message=FALSE}
+library(rjags)
+model.logistic <- jags.model(textConnection(jags.logistic), data = Churn, 
+                    n.chains = 3, n.adapt = 1000, quiet = TRUE)
+
+Logit.output <- coda.samples(model.logistic, variable.names = c("intercept", "b"), n.iter = 5000)
+```
+
+And below are the results of of the logit. 
+
+```{r}
+summary(Logit.output)$statistic[,1:2]
+```
+
+### Comparison with normal logistic regression
+```{r}
+fit.logit <- glm(churn ~ ., data = Churn, family = binomial(link = "logit"))
+coef(fit.logit)
+```
+
+Hence, on comparison coefficients obtained by Bayesian methods and that by normal GLM (logit link) are indeed very close. 
+
+
+##Check convergence and interpret the results
+
+Assessing convergence is a much more nuanced process, as there are multiple ways to decide if the model has converged. What we want to determine is that our model has appropriately explored the parameter space for each parameter (through trace plots, traceplot function in the coda library), between and within chain variance (the gelman-rubin diagnostic, gelman.diag in the coda library), and auto-correlation in our chains (autocorr.plot in coda). 
+
+```{r Check convergence - TracePlots Ex3, fig.cap="the three chains are overlapping for all parameters."}
+library(lattice)
+xyplot(Logit.output)
+
+```
+
+
+```{r, fig.cap="Gelman Plot, Srink factor for all parameters is <1.10"}
+par(mfrow = c(2,3))
+gelman.plot(Logit.output, auto.layout = FALSE)
+par(mfrow = c(1,1))
+```
+
+## redo the analysis with a probit model
+
+```{r}
+
+# grep, grepl, regexpr, gregexpr and regexec search for
+# matches to argument pattern within each element of a
+# character vector: they differ in the format of and amount
+# of detail in the results.
+
+# sub and gsub perform replacement of the first and all
+# matches respectively.
+jags.probit <- gsub("logit", "probit", jags.logistic)
+
+model.probit <- jags.model(textConnection(jags.probit), data = Churn, 
+                    n.chains = 3, n.adapt = 1000, quiet = TRUE)
+
+Probit.output <- coda.samples(model.probit, variable.names = c("intercept", "b"), 
+                             n.iter = 10000, thin = 2)
+
+summary(Probit.output)$statistic[,1:2]
+```
+
+As previously we compare the Bayesian results to the normal probit regression. 
+
+```{r}
+## in the link function we set it to "probit"
+fit.probit <- glm(churn ~ ., data = Churn, family = binomial(link = "probit"))
+coef(fit.probit)
+
+```
+
+And again a good match. It was expected as there is no much difference in the 'working' of Probit and Logit. Logit has better interpretation than probit. Logistic regression can be interpreted as modeling log odds. 
+
+## what is the probability that $\beta_{recency} \le 0$?
+
+We base our further inference based on the probit model. From the samples of the posterior distribution we can infere.We can estimate the probability that  $\beta_{recency} \le 0$ by looking at number/proportion of samples that are less than or equal to 0. And from the figure below we do not see any samples less than 0.  And we can say $P(\beta_{recency} \le 0) \approx 0$.
+
+```{r, fig.cap="density plot"}
+library(BEST)
+plotPost(Probit.output[[1]][,"b[4]"], compVal = 0 )
+
+```
+
+
+## what is the probability that $\beta_{gender} > \beta_{lor}$?
+
+In the similar way we calculate the posterior probability $\beta_{gender} > \beta_{lor}$. Rather we can look at $\beta_{gender} - \beta_{lor} > 0$. And we plot histogram of the differences. 
+
+
+```{r, fig.cap='Density plot of Beta_gender - beta_lor'}
+
+library(BEST)
+plotPost(Probit.output[[1]][,"b[1]"] - Probit.output[[1]][,"b[3]"],compVal = 0)
+
+```
+
+From the figure we can say $P(\beta_{gender} - \beta_{lor} > 0) = P(\beta_{gender} > \beta_{lor}) \approx 0.985$.
+
+## Make a prediction for the average observation
+
+```{r}
+X_avg = colMeans(Churn[,-1])
+head(X_avg)
+X_avg[1] = 0
+```
+
+As gender=0.495 does not make sense, because it is a categorical variable we set it to 1, to represent the males. Lets predict now(As we did in the previous question)
+
+```{r}
+beta_Names <- c('intercept', 'b[1]', 'b[2]', 'b[3]', 'b[4]')
+Beta_hat <- as.matrix(Probit.output[[1]][,beta_Names])
+
+round(Beta_hat[1:4,],2) # sample
+
+Y_hat <- Beta_hat %*% append(X_avg, values = 1, after = 0)
+
+```
+
+
+
+probability of churning for the average customer is : 0.50 as shown in the next figure. 
+
+```{r , fig.cap='predictive distribution of churn probability for mean observation '}
+library(BEST)
+plotPost(pnorm(Y_hat), xlab='Churn probability')
+```
+
+
+
+
+
+# Exercise 4: Bayesian quantile regression
+For this exercise you have to read the paper. Yu, K and Moyeed, R (2001). Bayesian quantile regression, Statistics & Probability Letters, 54(4), 437{447.
+
+## Write an R function that estimates the parameters of the model proposed in the paper.
+
+the Metropolis algorithm with normal proposal density should work fine (as well as the slice sampler).
+
+
+
+According the paper, the loss function is given by 
+
+$$
+  \rho_p (u) =  \frac{|u| + (2p - 1)u }{2} 
+$$
+
+```{r loss function}
+Loss.Function = function(vec,p){
+n  = length(vec)
+rho.p= vector(length = n)
+for (i in 1:n){
+      rho.p[i] =  (abs(vec[i]) + (2*p - 1)*vec[i]) * 0.5
+    }
+
+return(rho.p)
+}
+```
+
+In the mentioned paper the likelihood is given by equation (6). 
+
+$$
+L(Y| \beta) = p^n (1-p)^n exp( - \sum( \rho_p (y_i - x_i \beta ) )
+$$
+
+Or we can use the log likelihood to simplify the numerical calculations.
+
+$$
+ log(L(Y| \beta))  =n log(p) + n log(1-p) -   \sum( \rho_p (y_i - x_i \beta ) 
+$$
+
+```{r loglikelihood}
+
+log.likelihood = function( beta,y, x, p){
+# Log likelihood
+n = length(y)
+log.likelihood  =  n*log(p) + n*log(1-p) - sum(Loss.Function((y - x*beta),p))
+
+#likelihood  =  p^n * (1-p)^n * exp(- sum(Loss.Function((y - x*beta),p)))
+
+return(log.likelihood)
+}
+
+
+```
+
+And for the prior as mentioned in the section 4 of the paper using improper uniform for the prior of $\beta$ results in the proper joint posterior distribution. Its proof is shown in Appendix A of the mentioned paper. 
+```{r improper prior}
+
+prior <- function(beta){
+  return (1)
+}
+
+```
+
+
+
+```{r Metropolis, }
+
+Metropolis = function(N, stepsize, startpoint,y,x,p){
+  v = vector(length = N)
+  reject = 0
+  v[1] = startpoint
+  llikelihood = log.likelihood(v[1], y,x,p)
+  
+  for(i in 1:(N-1)){
+    current = v[i]
+    
+    ## normal proposal density as mentioned 
+    proposal = rnorm(1,v[i],stepsize)
+    
+    ## acceptance probability
+    llikelihood.proportion = log.likelihood(proposal,y,x,p)
+    ll.diff =  llikelihood.proportion - llikelihood
+    
+    if(ll.diff >= log(runif(1))){
+      v[i+1] = proposal
+      llikelihood = llikelihood.proportion ## replace with new ll
+    }else{
+    v[i+1] = current
+    reject = reject + 1 ## increase counter
+      
+    }
+  }
+  dist.output = list(samples = v, reject.rate=reject/N)
+  return(dist.output)
+}
+
+```
+
+
+## Do the simulation exercise in 5.1 Simulated data and compare your results with the results in the paper.
+
+The simulated data : generate n = 100 observations from the model
+
+$$
+ Y_i = \mu + \epsilon_i, i=1,2,....,n
+$$
+
+assuming that $\mu = 5.0$ and $\epsilon_i ~ N(0,1)$ for all  $i=1,2,....,n$
+
+```{r}
+n=100
+mu = 5
+sd = 1
+Y <- 5.0 + rnorm(n = n, mean = mu, sd = sd)
+
+```
+
+```{r, fig.cap="reach convergence withing few samples."}
+
+Metro.05 =  Metropolis(5000, stepsize = 5, startpoint = 5,
+y = Y, x =seq(from = 1, to = 1, length.out = n) , p = 0.05)
+Metro.25 =  Metropolis(5000, stepsize = 5, startpoint = 3,
+y = Y, x =seq(from = 1, to = 1, length.out = n) , p = 0.25)
+Metro.75 =  Metropolis(5000, stepsize = 5, startpoint = 3,
+y = Y, x =seq(from = 1, to = 1, length.out = n) , p = 0.75)
+Metro.95 =  Metropolis(5000, stepsize = 5, startpoint = 3,
+y = Y, x =seq(from = 1, to = 1, length.out = n) , p = 0.95)
+
+par(mfrow=c(2,2))
+plot(Metro.05$samples[], type = 'l', xlab = "p=0.05")
+plot(Metro.25$samples[], type = 'l', xlab = "p=0.25")
+plot(Metro.75$samples[], type = 'l', xlab = "p=0.75")
+plot(Metro.95$samples[], type = 'l', xlab = "p=0.95")
+par(mfrow = c(1,1))
+```
+
+From the trace plots, it is seen that convergence is achieved within few samples. Now the histograms : 
+
+```{r wrong hist, fig.cap="histograms of MCMC samples"}
+
+par(mfrow=c(2,2))
+hist(Metro.05$samples, plot = TRUE, freq = TRUE)
+hist(Metro.25$samples, plot = TRUE, freq = TRUE, breaks = 50)
+hist(Metro.75$samples, plot = TRUE, freq = TRUE, breaks = 50)
+hist(Metro.95$samples, plot = TRUE, freq = TRUE, breaks = 50)
+par(mfrow = c(1,1))
+
+
+```
+
+Clearly, only the shape of the histograms is 'similar' to figure 1 of the paper, however, the means and overall position is different. (couldnt debug this one, tried with likelihood too and not the log likelihood. )
+
+## Simulate 200 observations from the following model:
+
+$$y = x \beta  + \epsilon$$
+with $\beta = 2$ $x~U(0,10)$ and $\epsilon~N(0,0.6x)$
+
+
+```{r OLS}
+
+N <- 200
+X <- runif(n = N, min = 0, max = 10)
+beta <- 2
+error <- rnorm(200, 0, 0.6*X)
+Y <- X * beta + error
+
+```
+
+## Plot the data together with the OLS regression line.
+
+Estimate ordinary least square regression, and plot it with data. 
+
+```{r OLS plot, fig.cap="data together with the OLS regression line."}
+
+fit.ols = lm(Y~X)
+
+plot(X,Y)
+abline(a = fit.ols$coefficients[1], b = fit.ols$coefficients[2], lwd=2)
+```
+
+## Estimate the following quantiles q = {.05, .25, .5, .75, .95} and plot the regression lines based on the Bayes estimates on the same plot.
+
+We can use the same metropolis sampler to estimate the slope coefficients for q = {.05, .25, .5, .75, .95}.
+
+```{r, fig.cap="plot the regression lines based on the Bayes estimates"}
+
+metro2.05 =  Metropolis(5000, stepsize = 5, startpoint = 5,
+y = Y, x =X , p = 0.05)
+
+metro2.25 =  Metropolis(5000, stepsize = 5, startpoint = 5,
+y = Y, x =X , p = 0.25)
+
+metro2.50 =  Metropolis(5000, stepsize = 5, startpoint = 5,
+y = Y, x =X , p = 0.50)
+
+metro2.75 =  Metropolis(5000, stepsize = 5, startpoint = 5,
+y = Y, x =X , p = 0.75)
+
+metro2.95 =  Metropolis(5000, stepsize = 5, startpoint = 5,
+y = Y, x =X , p = 0.95)
+
+slope.coefficients05 = mean(metro2.05$samples)
+slope.coefficients25 = mean(metro2.25$samples)
+slope.coefficients50 = mean(metro2.50$samples)
+slope.coefficients75 = mean(metro2.75$samples)
+slope.coefficients95 = mean(metro2.95$samples)
+              
+plot(X,Y)
+abline(a = fit.ols$coefficients[1], b = fit.ols$coefficients[2], lwd=2)
+
+intercept.ols = fit.ols$coefficients[1]
+abline(a=intercept.ols, b = slope.coefficients05, col = 2)
+abline(a=intercept.ols, b = slope.coefficients25, col = 3)
+abline(a=intercept.ols, b = slope.coefficients50, col = 4)
+abline(a=intercept.ols, b = slope.coefficients75, col = 5)
+abline(a=intercept.ols, b = slope.coefficients95, col = 6)
+       
+       
+
+```
+
+
+
+# Exercise 5: 
+The dataset `falcon data.RData' was collected about Belgian falcons. The
+dataset contains information about the mass (in grams), the region (two
+levels) and the population (three levels) of the falcons.
+
+The goal is to compare frequentist hypothesis testing and Bayesian hypothesis testing,
+using the falcon dataset. 
+
+## Calculate a frequentist t-test and ANOVA and interpret the results
+
+Let us start with the frequentist t-test and compare weights between two different regions.
+
+```{r, fig.cap="Boxplots of weight region wise."}
+#setwd("C:/Users/Omkar/OneDrive/Bayesian Statistics/Exam_Omkar")
+load("falcon_data.RData")
+
+# Visualize both weight in ddifferent regions. 
+boxplot(falcon_data$mass~falcon_data$region, xlab="region", ylab="Weight of falcon")
+
+```
+
+```{r, fig.cap="Boxplots of weight population wise."}
+boxplot(falcon_data$mass~falcon_data$population, xlab="Population", ylab="Weight of falcon")
+```
+A frequentist t-test tests the null hypothesis if the mean falcon weights in the two
+groups are the same:
+
+```{r}
+t.test(mass~region, data = falcon_data)$p.value
+```
+
+P value < 0.001, therefore we have enough evidence to reject null hypothesis on 5% significance level. Hence, a frequentist t-test accepts the alternative hypothesis that the group
+means differ.
+
+### ANOVA
+
+The analysis of variance (ANOVA) generalizes the two-sample t-test to compare any number of means.
+ANOVA is based on the F statistic which under $H_0:\mu_1=\mu_2=\dots=\mu_G$:
+
+Below are the results of ANOVA tests.
+```{r}
+summary(aov(mass~region, data=falcon_data))
+summary(aov(mass~population, data=falcon_data))
+summary(aov(mass~population+region, data=falcon_data))
+```
+As expected, the Null hypothesis is rejected for all groups and subgroups.
+
+## Calculate a Bayesian t-test and ANOVA
+
+To test the same hypothesis, we use linear model in Bayesian framework. Bayesian analysis assumes the t-distribution as a convenient (robust) descriptive model of data (with outliers), and not as the sampling distribution.  The default priors taken are minimally informative: normal priors with large standard deviation for ($\mu$), broad uniform priors for ($\sigma$), and a shifted-exponential prior for ($\nu$).A convenient way to sample from this Bayesian $\mu_1 - \mu_2$ distribution is with the BEST package.
+
+```{r, results='hide'}
+library(BEST)
+mass_Region <-  with(falcon_data, BESTmcmc(mass[region==1], mass[region==2]))
+mass_Pop1vs2 <- with(falcon_data, BESTmcmc(mass[population==1], mass[population==2]))
+mass_Pop1vs3 <- with(falcon_data, BESTmcmc(mass[population==1], mass[population==3]))
+mass_Pop2vs3 <- with(falcon_data, BESTmcmc(mass[population==2], mass[population==3]))
+```
+
+### Hypothesis testing with HDI and ROPE
+
+Bayesian hypothesis testing is done with ROPE and HDI. A region of practical equivalence (ROPE) indicates a small range of parameter values that are considered to be practically equivalent to the null value for purposes of the particular application. A parameter value is declared to be not credible, or rejected, if its entire ROPE lies outside the 95% highest density interval  of the posterior distribution of that parameter, or vice versa accepted. 
+
+We now plot the distributions of $\mu_1 - \mu_2$ in below figures. 
+
+```{r , fig.cap='Bayesian two sample t-test.'}
+par(mfrow = c(2,2))
+plot(mass_Region, main='Region', ROPE=c(-0.05, 0.05))
+plot(mass_Pop1vs2, main='Population 1 vs 2', ROPE=c(-0.05, 0.05))
+plot(mass_Pop1vs3, main='Population 1 vs 3', ROPE=c(-0.05, 0.05))
+plot(mass_Pop2vs3, main='Population 2 vs 3', ROPE=c(-0.05, 0.05))
+par(mfrow = c(1,1))
+
+```
+
+In case of Population 1 vs 3 we can not say that we accept the $H_0$ for practical purposes since the 95%HDI is not within the ROPE. Thus there is no concrete decision. 
+
+

@@ -1,0 +1,227 @@
+---
+title: "Q4"
+author: "Omkar Kulkarni"
+date: "September 7, 2016"
+output: pdf_document
+---
+
+# Exercise 4: Bayesian quantile regression
+For this exercise you have to read the paper. Yu, K and Moyeed, R (2001). Bayesian quantile regression, Statistics & Probability Letters, 54(4), 437{447.
+
+## Write an R function that estimates the parameters of the model proposed in the paper.
+
+the Metropolis algorithm with normal proposal density should work fine (as well as the slice sampler).
+
+
+
+According the paper, the loss function is given by 
+
+$$
+  \rho_p (u) =  \frac{|u| + (2p - 1)u }{2} 
+$$
+
+```{r loss function}
+Loss.Function = function(vec,p){
+n  = length(vec)
+rho.p= vector(length = n)
+for (i in 1:n){
+      rho.p[i] =  (abs(vec[i]) + (2*p - 1)*vec[i]) * 0.5
+    }
+
+return(rho.p)
+}
+```
+
+In the mentioned paper the likelihood is given by equation (6). 
+
+$$
+L(Y| \beta) = p^n (1-p)^n exp( - \sum( \rho_p (y_i - x_i \beta ) )
+$$
+
+Or we can use the log likelihood to simplify the numerical calculations.
+
+$$
+ log(L(Y| \beta))  =n log(p) + n log(1-p) -   \sum( \rho_p (y_i - x_i \beta ) 
+$$
+
+```{r loglikelihood}
+
+log.likelihood = function( beta,y, x, p){
+# Log likelihood
+n = length(y)
+log.likelihood  =  n*log(p) + n*log(1-p) - sum(Loss.Function((y - x*beta),p))
+
+#likelihood  =  p^n * (1-p)^n * exp(- sum(Loss.Function((y - x*beta),p)))
+
+return(log.likelihood)
+}
+
+
+```
+
+And for the prior as mentioned in the section 4 of the paper using improper uniform for the prior of $\beta$ results in the proper joint posterior distribution. Its proof is shown in Appendix A of the mentioned paper. 
+```{r improper prior}
+
+prior <- function(beta){
+  return (1)
+}
+
+```
+
+
+
+```{r Metropolis, }
+
+Metropolis = function(N, stepsize, startpoint,y,x,p){
+  v = vector(length = N)
+  reject = 0
+  v[1] = startpoint
+  llikelihood = log.likelihood(v[1], y,x,p)
+  
+  for(i in 1:(N-1)){
+    current = v[i]
+    
+    ## normal proposal density as mentioned 
+    proposal = rnorm(1,v[i],stepsize)
+    
+    ## acceptance probability
+    llikelihood.proportion = log.likelihood(proposal,y,x,p)
+    ll.diff =  llikelihood.proportion - llikelihood
+    
+    if(ll.diff >= log(runif(1))){
+      v[i+1] = proposal
+      llikelihood = llikelihood.proportion ## replace with new ll
+    }else{
+    v[i+1] = current
+    reject = reject + 1 ## increase counter
+      
+    }
+  }
+  dist.output = list(samples = v, reject.rate=reject/N)
+  return(dist.output)
+}
+
+```
+
+
+## Do the simulation exercise in 5.1 Simulated data and compare your results with the results in the paper.
+
+The simulated data : generate n = 100 observations from the model
+
+$$
+ Y_i = \mu + \epsilon_i, i=1,2,....,n
+$$
+
+assuming that $\mu = 5.0$ and $\epsilon_i ~ N(0,1)$ for all  $i=1,2,....,n$
+
+```{r}
+n=100
+mu = 5
+sd = 1
+Y <- 5.0 + rnorm(n = n, mean = mu, sd = sd)
+
+```
+
+```{r, fig.cap="reach convergence withing few samples."}
+
+Metro.05 =  Metropolis(5000, stepsize = 5, startpoint = 5,
+y = Y, x =seq(from = 1, to = 1, length.out = n) , p = 0.05)
+Metro.25 =  Metropolis(5000, stepsize = 5, startpoint = 3,
+y = Y, x =seq(from = 1, to = 1, length.out = n) , p = 0.25)
+Metro.75 =  Metropolis(5000, stepsize = 5, startpoint = 3,
+y = Y, x =seq(from = 1, to = 1, length.out = n) , p = 0.75)
+Metro.95 =  Metropolis(5000, stepsize = 5, startpoint = 3,
+y = Y, x =seq(from = 1, to = 1, length.out = n) , p = 0.95)
+
+par(mfrow=c(2,2))
+plot(Metro.05$samples[], type = 'l', xlab = "p=0.05")
+plot(Metro.25$samples[], type = 'l', xlab = "p=0.25")
+plot(Metro.75$samples[], type = 'l', xlab = "p=0.75")
+plot(Metro.95$samples[], type = 'l', xlab = "p=0.95")
+par(mfrow = c(1,1))
+```
+
+From the trace plots, it is seen that convergence is achieved within few samples. Now the histograms : 
+
+```{r wrong hist, fig.cap="histograms of MCMC samples"}
+
+par(mfrow=c(2,2))
+hist(Metro.05$samples, plot = TRUE, freq = TRUE)
+hist(Metro.25$samples, plot = TRUE, freq = TRUE, breaks = 50)
+hist(Metro.75$samples, plot = TRUE, freq = TRUE, breaks = 50)
+hist(Metro.95$samples, plot = TRUE, freq = TRUE, breaks = 50)
+par(mfrow = c(1,1))
+
+
+```
+
+Clearly, only the shape of the histograms is 'similar' to figure 1 of the paper, however, the means and overall position is different. (couldnt debug this one, tried with likelihood too and not the log likelihood. )
+
+## Simulate 200 observations from the following model:
+
+$$y = x \beta  + \epsilon$$
+with $\beta = 2$ $x~U(0,10)$ and $\epsilon~N(0,0.6x)$
+
+
+```{r OLS}
+
+N <- 200
+X <- runif(n = N, min = 0, max = 10)
+beta <- 2
+error <- rnorm(200, 0, 0.6*X)
+Y <- X * beta + error
+
+```
+
+## Plot the data together with the OLS regression line.
+
+Estimate ordinary least square regression, and plot it with data. 
+
+```{r OLS plot, fig.cap="data together with the OLS regression line."}
+
+fit.ols = lm(Y~X)
+
+plot(X,Y)
+abline(a = fit.ols$coefficients[1], b = fit.ols$coefficients[2], lwd=2)
+```
+
+## Estimate the following quantiles q = {.05, .25, .5, .75, .95} and plot the regression lines based on the Bayes estimates on the same plot.
+
+We can use the same metropolis sampler to estimate the slope coefficients for q = {.05, .25, .5, .75, .95}.
+
+```{r, fig.cap="plot the regression lines based on the Bayes estimates"}
+
+metro2.05 =  Metropolis(5000, stepsize = 5, startpoint = 5,
+y = Y, x =X , p = 0.05)
+
+metro2.25 =  Metropolis(5000, stepsize = 5, startpoint = 5,
+y = Y, x =X , p = 0.25)
+
+metro2.50 =  Metropolis(5000, stepsize = 5, startpoint = 5,
+y = Y, x =X , p = 0.50)
+
+metro2.75 =  Metropolis(5000, stepsize = 5, startpoint = 5,
+y = Y, x =X , p = 0.75)
+
+metro2.95 =  Metropolis(5000, stepsize = 5, startpoint = 5,
+y = Y, x =X , p = 0.95)
+
+slope.coefficients05 = mean(metro2.05$samples)
+slope.coefficients25 = mean(metro2.25$samples)
+slope.coefficients50 = mean(metro2.50$samples)
+slope.coefficients75 = mean(metro2.75$samples)
+slope.coefficients95 = mean(metro2.95$samples)
+              
+plot(X,Y)
+abline(a = fit.ols$coefficients[1], b = fit.ols$coefficients[2], lwd=2)
+
+intercept.ols = fit.ols$coefficients[1]
+abline(a=intercept.ols, b = slope.coefficients05, col = 2)
+abline(a=intercept.ols, b = slope.coefficients25, col = 3)
+abline(a=intercept.ols, b = slope.coefficients50, col = 4)
+abline(a=intercept.ols, b = slope.coefficients75, col = 5)
+abline(a=intercept.ols, b = slope.coefficients95, col = 6)
+       
+       
+
+```
